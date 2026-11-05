@@ -35,3 +35,25 @@ jobs:
 
       - name: Unit tests
         run: pytest
+
+  docker:
+    name: Build and start image
+    runs-on: ubuntu-latest
+    needs: unit
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build image
+        run: docker build -t gke-flyway-cicd:ci .
+
+      # Starting uvicorn imports the app and psycopg, which catches musl/wheel problems
+      # a plain build would miss. /healthz does not need the database.
+      - name: Start container and check /healthz
+        run: |
+          docker run -d --name app -p 8000:8000 gke-flyway-cicd:ci
+          for i in $(seq 1 15); do
+            if curl -fsS http://localhost:8000/healthz; then exit 0; fi
+            sleep 1
+          done
+          docker logs app
+          exit 1
