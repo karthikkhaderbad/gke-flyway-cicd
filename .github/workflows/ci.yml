@@ -36,6 +36,24 @@ jobs:
       - name: Unit tests
         run: pytest
 
+      - name: Lint Helm chart
+        run: helm lint charts/app -f charts/app/values-ci.yaml
+
+      - name: Render Helm chart
+        run: helm template app charts/app -f charts/app/values-ci.yaml > /dev/null
+
+      - name: Install kubeconform
+        run: |
+          curl -fsSL https://github.com/yannh/kubeconform/releases/download/v0.6.7/kubeconform-linux-amd64.tar.gz \
+            | sudo tar -xz -C /usr/local/bin kubeconform
+
+      # Validates every rendered manifest against the Kubernetes API schema.
+      - name: Validate manifests with kubeconform
+        run: |
+          set -o pipefail
+          helm template app charts/app -f charts/app/values-ci.yaml \
+            | kubeconform -strict -summary -kubernetes-version 1.31.0
+
   docker:
     name: Build and start image
     runs-on: ubuntu-latest
