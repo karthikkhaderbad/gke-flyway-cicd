@@ -1,0 +1,12 @@
+# Overrides for the kind cluster in CI. The image is built on the runner and loaded
+# into kind, so it must never be pulled.
+image:
+  repository: gke-flyway-cicd
+  tag: ci
+  pullPolicy: Never
+
+db:
+  host: postgres
+  name: app
+  user: app
+  password: ci-only-password

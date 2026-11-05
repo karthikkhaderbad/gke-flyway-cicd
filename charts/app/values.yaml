@@ -1,0 +1,31 @@
+replicaCount: 1
+
+image:
+  repository: ghcr.io/karthikkhaderbad/gke-flyway-cicd
+  # Defaults to the chart appVersion; CD sets it to v<run_number>.
+  tag: ""
+  pullPolicy: IfNotPresent
+
+containerPort: 8000
+
+service:
+  type: ClusterIP
+  port: 80
+
+db:
+  host: ""
+  port: 5432
+  name: app
+  user: app
+  # Plain value, for throwaway databases only (CI). For real environments set
+  # existingSecret to the name of a Secret that holds the password under secretKey.
+  password: ""
+  existingSecret: ""
+  secretKey: password
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 64Mi
+  limits:
+    memory: 128Mi
