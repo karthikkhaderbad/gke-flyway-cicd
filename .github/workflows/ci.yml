@@ -55,7 +55,7 @@ jobs:
             | kubeconform -strict -summary -kubernetes-version 1.31.0
 
   docker:
-    name: Build and start image
+    name: "Docker: build image and check it starts"
     runs-on: ubuntu-latest
     needs: unit
     steps:
@@ -75,3 +75,85 @@ jobs:
           done
           docker logs app
           exit 1
+
+  k8s:
+    name: "K8s: deploy chart and check Service and DB"
+    runs-on: ubuntu-latest
+    needs: docker
+    # Skipped until the GCP repo variables exist, and on fork PRs, which cannot get an OIDC token.
+    if: ${{ vars.CLOUDSQL_INSTANCE != '' && github.event.pull_request.head.repo.full_name == github.repository }}
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build image
+        run: docker build -t gke-flyway-cicd:ci .
+
+      - name: Authenticate to GCP
+        uses: google-github-actions/auth@v3
+        with:
+          workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.GCP_CI_SERVICE_ACCOUNT }}
+
+      - name: Fetch read-only DB password
+        run: |
+          pw=$(gcloud secrets versions access latest --secret=db-ci-ro-password)
+          echo "::add-mask::$pw"
+          echo "DB_PASSWORD=$pw" >> "$GITHUB_ENV"
+
+      # The tunnel to Cloud SQL. It listens on all interfaces so pods in kind can reach it.
+      - name: Start Cloud SQL Auth Proxy
+        run: |
+          curl -fsSL -o cloud-sql-proxy \
+            https://storage.googleapis.com/cloud-sql-connectors/cloud-sql-proxy/v2.14.1/cloud-sql-proxy.linux.amd64
+          chmod +x cloud-sql-proxy
+          ./cloud-sql-proxy --address 0.0.0.0 --port 5432 "${{ vars.CLOUDSQL_INSTANCE }}" > proxy.log 2>&1 &
+          for i in $(seq 1 15); do
+            if timeout 1 bash -c '</dev/tcp/127.0.0.1/5432'; then exit 0; fi
+            sleep 1
+          done
+          cat proxy.log
+          exit 1
+
+      - name: Create local Kubernetes cluster (kind) and load image
+        run: |
+          kind create cluster --wait 120s
+          kind load docker-image gke-flyway-cicd:ci
+
+      # --wait only returns once the pod is Ready, and /readyz needs the database,
+      # so this step also proves the pod can reach Cloud SQL.
+      - name: Deploy chart
+        run: |
+          gateway=$(docker network inspect kind -f '{{(index .IPAM.Config 0).Gateway}}')
+          helm upgrade --install app charts/app -f charts/app/values-ci.yaml \
+            --set-string db.host="$gateway" \
+            --set-string db.password="$DB_PASSWORD" \
+            --wait --timeout 3m
+
+      - name: Check pods are healthy
+        run: |
+          kubectl rollout status deploy/app-app --timeout=60s
+          kubectl get pods -l app.kubernetes.io/instance=app
+          restarts=$(kubectl get pods -l app.kubernetes.io/instance=app \
+            -o jsonpath='{.items[*].status.containerStatuses[*].restartCount}')
+          echo "restart counts: $restarts"
+          for r in $restarts; do test "$r" = "0"; done
+
+      # A Service is a virtual IP and does not answer ping, so request it over HTTP by DNS name.
+      - name: Check Service from inside the pod
+        run: |
+          kubectl exec deploy/app-app -- python -c "import urllib.request as u; r = u.urlopen('http://app-app/healthz', timeout=5); print(r.status); assert r.status == 200"
+
+      - name: Check DB connection from inside the pod
+        run: |
+          kubectl exec deploy/app-app -- python -c "from app import db; print(db.db_version())"
+
+      - name: Dump diagnostics
+        if: failure()
+        run: |
+          kubectl get pods -o wide || true
+          kubectl describe pods || true
+          kubectl logs deploy/app-app --tail=100 || true
+          cat proxy.log || true

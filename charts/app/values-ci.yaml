@@ -5,8 +5,11 @@ image:
   tag: ci
   pullPolicy: Never
 
+# CI connects to Cloud SQL through the Auth Proxy on the runner as a read-only user.
+# db.host (the runner's address on the kind network) and db.password (from Secret
+# Manager) are set with --set at deploy time. The host below only satisfies the
+# chart's `required` check when linting and rendering.
 db:
-  host: postgres
+  host: set-at-deploy
   name: app
-  user: app
-  password: ci-only-password
+  user: ci_ro
