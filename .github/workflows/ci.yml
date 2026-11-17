@@ -97,19 +97,15 @@ jobs:
           workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
           service_account: ${{ vars.GCP_CI_SERVICE_ACCOUNT }}
 
-      - name: Fetch read-only DB password
-        run: |
-          pw=$(gcloud secrets versions access latest --secret=db-ci-ro-password)
-          echo "::add-mask::$pw"
-          echo "DB_PASSWORD=$pw" >> "$GITHUB_ENV"
-
       # The tunnel to Cloud SQL. It listens on all interfaces so pods in kind can reach it.
+      # --auto-iam-authn makes the proxy log in as the service account (IAM database
+      # authentication), so there is no database password.
       - name: Start Cloud SQL Auth Proxy
         run: |
           curl -fsSL -o cloud-sql-proxy \
             https://storage.googleapis.com/cloud-sql-connectors/cloud-sql-proxy/v2.14.1/cloud-sql-proxy.linux.amd64
           chmod +x cloud-sql-proxy
-          ./cloud-sql-proxy --address 0.0.0.0 --port 5432 "${{ vars.CLOUDSQL_INSTANCE }}" > proxy.log 2>&1 &
+          ./cloud-sql-proxy --auto-iam-authn --address 0.0.0.0 --port 5432 "${{ vars.CLOUDSQL_INSTANCE }}" > proxy.log 2>&1 &
           for i in $(seq 1 15); do
             if timeout 1 bash -c '</dev/tcp/127.0.0.1/5432'; then exit 0; fi
             sleep 1
@@ -129,7 +125,6 @@ jobs:
           gateway=$(docker network inspect kind -f '{{(index .IPAM.Config 0).Gateway}}')
           helm upgrade --install app charts/app -f charts/app/values-ci.yaml \
             --set-string db.host="$gateway" \
-            --set-string db.password="$DB_PASSWORD" \
             --wait --timeout 3m
 
       - name: Check pods are healthy

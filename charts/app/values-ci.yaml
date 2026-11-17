@@ -5,11 +5,14 @@ image:
   tag: ci
   pullPolicy: Never
 
-# CI connects to Cloud SQL through the Auth Proxy on the runner as a read-only user.
-# db.host (the runner's address on the kind network) and db.password (from Secret
-# Manager) are set with --set at deploy time. The host below only satisfies the
-# chart's `required` check when linting and rendering.
+# CI connects to Cloud SQL through the Auth Proxy on the runner, which logs in as the
+# github-ci service account (IAM database authentication) with read-only grants. The
+# user is that account's email without ".gserviceaccount.com". The password is ignored
+# by the proxy and only exists so the client has something to send. db.host (the
+# runner's address on the kind network) is set with --set at deploy time. The host below
+# only satisfies the chart's `required` check when linting and rendering.
 db:
   host: set-at-deploy
   name: app
-  user: ci_ro
+  user: github-ci@project-3b36b61c-c92a-46b7-994.iam
+  password: unused
