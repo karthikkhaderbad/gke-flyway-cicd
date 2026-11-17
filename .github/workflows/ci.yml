@@ -136,6 +136,19 @@ jobs:
           echo "restart counts: $restarts"
           for r in $restarts; do test "$r" = "0"; done
 
+      # The Service's endpoints must be exactly the pods this Deployment created, which
+      # catches a wrong or too-broad selector in service.yaml.
+      - name: Check Service endpoints match the Deployment's pods
+        run: |
+          pods=$(kubectl get pods -l app.kubernetes.io/instance=app \
+            -o jsonpath='{.items[*].status.podIP}' | tr ' ' '\n' | sort)
+          endpoints=$(kubectl get endpointslices -l kubernetes.io/service-name=app \
+            -o jsonpath='{.items[*].endpoints[*].addresses[*]}' | tr ' ' '\n' | sort)
+          echo "pod IPs:"; echo "$pods"
+          echo "Service endpoint IPs:"; echo "$endpoints"
+          test -n "$pods"
+          test "$pods" = "$endpoints"
+
       # A Service IP is virtual and does not answer ICMP ping (and the pod has no NET_RAW),
       # so resolve the Service DNS name and open a TCP connection to its port instead.
       # The probes already cover /healthz.
