@@ -125,7 +125,10 @@ jobs:
       # so this step also proves the pod can reach Cloud SQL.
       - name: Deploy chart
         run: |
-          gateway=$(docker network inspect kind -f '{{(index .IPAM.Config 0).Gateway}}')
+          # The kind network has an IPv6 and an IPv4 subnet, and the proxy listens on IPv4,
+          # so pick the IPv4 gateway.
+          gateway=$(docker network inspect kind -f '{{range .IPAM.Config}}{{.Gateway}}{{"\n"}}{{end}}' | grep -v ':' | head -1)
+          echo "DB host (runner gateway): $gateway"
           helm upgrade --install app charts/app -f charts/app/values-ci.yaml \
             --set-string db.host="$gateway" \
             --wait --timeout 3m
