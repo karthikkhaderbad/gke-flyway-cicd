@@ -18,7 +18,7 @@ What has been built so far, in the order it happened. For the original design se
 Done by hand in the console.
 
 1. **Free trial billing.** The billing account was shown as closed until the trial prepayment cleared. After that the trial was active (credit expires Jan 27, 2027).
-2. **Cloud SQL instance `gke-flyway-db`.** PostgreSQL 16, Enterprise edition, `us-east1`, `db-g1-small` (1 vCPU, 1.7 GB), 10 GB SSD, single zone, public IP with no authorized networks. The Sandbox preset was changed from 2 vCPU and 8 GB to cut the cost from about $0.14 to about $0.04 an hour.
+2. **Cloud SQL instance `gke-flyway-db`.** PostgreSQL 16, Enterprise edition, `us-east1`, `db-g1-small` (1 vCPU, 1.7 GB), 10 GB SSD, single zone, public IP with no authorized networks. The Sandbox preset was changed from 2 vCPU and 8 GB to cut the cost from about $0.14 to about $0.04 an hour. Automated backups are disabled. **Prevent instance deletion is on** (the default), so turn it off before deleting the instance. "Final backup on instance deletion" is also on by default and keeps a backup for 30 days.
 3. **Database `app`** created on the instance.
 4. **APIs enabled** (project: `project-3b36b61c-c92a-46b7-994`). Needed for this pipeline:
 
@@ -32,7 +32,7 @@ Done by hand in the console.
    | Service Networking API | Present on the project, not used yet. Relevant if the instance moves to private IP |
 
    The other APIs in the list (BigQuery, Storage, Logging, Monitoring and so on) are project defaults and are not used. **Secret Manager API is not enabled.** It is only needed if the DB password route is used, and the plan is now IAM authentication.
-5. **Service account `github-ci`.** The console rejected the ID `gh-ci` because service account IDs need at least 6 characters. Current roles on the project: **Cloud SQL Client** and **Secret Manager Secret Accessor**. The second one was granted at project level and is broader than needed. It will be removed once the switch to IAM authentication removes the secret.
+5. **Service account `github-ci`.** The console rejected the ID `gh-ci` because service account IDs need at least 6 characters. Roles on the project: **Cloud SQL Client** (lets the Auth Proxy connect) and **Cloud SQL Instance User** (lets it log in as a database user). Secret Manager Secret Accessor was granted at project level at first, which was broader than needed, and was removed when the plan moved to IAM database authentication.
 6. **Workload Identity Federation (GitHub OIDC).**
    - Pool `github`.
    - Provider `github-oidc` (OIDC), issuer `https://token.actions.githubusercontent.com`, default audience.
@@ -40,6 +40,17 @@ Done by hand in the console.
    - Attribute condition: `assertion.repository == 'karthikkhaderbad/gke-flyway-cicd'`, so tokens from any other repo are rejected.
    - **Grant access** on the pool, using service account impersonation: service account `github-ci`, principal attribute `repository` = `karthikkhaderbad/gke-flyway-cicd`. The direct "federated identities" option was not used, because not every service in the pipeline is known to support it.
 7. **GitHub repository variables** (identifiers, not secrets): `CLOUDSQL_INSTANCE` (the instance connection name), `GCP_WORKLOAD_IDENTITY_PROVIDER` (the provider's resource path) and `GCP_CI_SERVICE_ACCOUNT` (the service account email).
+8. **IAM database authentication (Nov 17).** The instance flag `cloudsql.iam_authentication` is **on**. The CI service account was added as a database user (Users, Add user account, Cloud IAM, principal `github-ci@project-3b36b61c-c92a-46b7-994.iam.gserviceaccount.com`, Database roles left empty). The console assigned the Cloud SQL Instance User role to it automatically. The database user name is the email without `.gserviceaccount.com`: `github-ci@project-3b36b61c-c92a-46b7-994.iam`. An IAM user has no database privileges by default, and it is not a member of `cloudsqlsuperuser`.
+9. **Read-only grants.** In Cloud SQL Studio, signed in as `postgres` on database `app`:
+
+   ```sql
+   GRANT CONNECT ON DATABASE app TO "github-ci@project-3b36b61c-c92a-46b7-994.iam";
+   GRANT USAGE ON SCHEMA public TO "github-ci@project-3b36b61c-c92a-46b7-994.iam";
+   GRANT SELECT ON ALL TABLES IN SCHEMA public TO "github-ci@project-3b36b61c-c92a-46b7-994.iam";
+   ```
+
+   All three ran successfully. The database has no tables yet, so the last grant covers nothing so far. Tables created later (by Flyway) will need a default-privileges grant for the CI user.
+10. **Check that the user is not a superuser:** `SELECT pg_has_role('github-ci@project-3b36b61c-c92a-46b7-994.iam', 'cloudsqlsuperuser', 'member');` returned `false`.
 
 ## 4. Kubernetes stage in CI (Nov 15 to now, PR #5, open)
 
@@ -64,6 +75,7 @@ Done by hand in the console.
 ## 6. Where things stand
 
 - Done: app, Docker image, Helm chart, CI up to the GCP login, GCP project setup for CI.
-- In progress: switching the CI database login to IAM authentication (instance flag, IAM database user for `github-ci`, Cloud SQL Instance User role, read-only grants, then removing the secret step and adding `--auto-iam-authn` to the proxy).
+- Done on the GCP side: IAM database authentication for `github-ci` (flag, IAM database user, Cloud SQL Instance User role, read-only grants).
+- In progress: the repo changes for it, which are removing the "Fetch read-only DB password" step, adding `--auto-iam-authn` to the proxy, and setting `db.user` and a placeholder `db.password` in `values-ci.yaml`. Until those land, the `k8s` job still fails at the secret fetch.
 - Next: `cd.yml` (push to GHCR as `v<run_number>`, Helm deploy to GKE with a separate deploy service account limited to `main`), the Flyway migration job, the README.
-- Known cleanup: remove the project-level Secret Manager Secret Accessor role from `github-ci`, and bring `docs/gcp-setup.md` in line with the console steps and IAM authentication.
+- Known cleanup: bring `docs/gcp-setup.md` in line with the console steps and IAM authentication (it still describes the password route and the name `gh-ci`).
