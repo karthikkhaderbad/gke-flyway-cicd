@@ -107,7 +107,10 @@ jobs:
           chmod +x cloud-sql-proxy
           ./cloud-sql-proxy --auto-iam-authn --address 0.0.0.0 --port 5432 "${{ vars.CLOUDSQL_INSTANCE }}" > proxy.log 2>&1 &
           for i in $(seq 1 15); do
-            if timeout 1 bash -c '</dev/tcp/127.0.0.1/5432'; then exit 0; fi
+            if timeout 1 bash -c '</dev/tcp/127.0.0.1/5432' 2>/dev/null; then
+              echo "Auth Proxy is listening on port 5432"
+              exit 0
+            fi
             sleep 1
           done
           cat proxy.log
