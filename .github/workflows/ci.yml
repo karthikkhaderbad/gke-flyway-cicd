@@ -55,7 +55,7 @@ jobs:
             | kubeconform -strict -summary -kubernetes-version 1.31.0
 
   docker:
-    name: Build and start image
+    name: "Docker: build image and check it starts"
     runs-on: ubuntu-latest
     needs: unit
     steps:
@@ -75,3 +75,101 @@ jobs:
           done
           docker logs app
           exit 1
+
+  k8s:
+    name: "K8s: deploy chart and check Service and DB"
+    runs-on: ubuntu-latest
+    needs: docker
+    # Skipped until the GCP repo variables exist, and on fork PRs, which cannot get an OIDC token.
+    if: ${{ vars.CLOUDSQL_INSTANCE != '' && github.event.pull_request.head.repo.full_name == github.repository }}
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build image
+        run: docker build -t gke-flyway-cicd:ci .
+
+      - name: Authenticate to GCP
+        uses: google-github-actions/auth@v3
+        with:
+          workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.GCP_CI_SERVICE_ACCOUNT }}
+
+      # The tunnel to Cloud SQL. It listens on all interfaces so pods in kind can reach it.
+      # --auto-iam-authn makes the proxy log in as the service account (IAM database
+      # authentication), so there is no database password.
+      - name: Start Cloud SQL Auth Proxy
+        run: |
+          curl -fsSL -o cloud-sql-proxy \
+            https://storage.googleapis.com/cloud-sql-connectors/cloud-sql-proxy/v2.14.1/cloud-sql-proxy.linux.amd64
+          chmod +x cloud-sql-proxy
+          ./cloud-sql-proxy --auto-iam-authn --address 0.0.0.0 --port 5432 "${{ vars.CLOUDSQL_INSTANCE }}" > proxy.log 2>&1 &
+          for i in $(seq 1 15); do
+            if timeout 1 bash -c '</dev/tcp/127.0.0.1/5432' 2>/dev/null; then
+              echo "Auth Proxy is listening on port 5432"
+              exit 0
+            fi
+            sleep 1
+          done
+          cat proxy.log
+          exit 1
+
+      - name: Create local Kubernetes cluster (kind) and load image
+        run: |
+          kind create cluster --wait 120s
+          kind load docker-image gke-flyway-cicd:ci
+
+      # --wait only returns once the pod is Ready, and /readyz needs the database,
+      # so this step also proves the pod can reach Cloud SQL.
+      - name: Deploy chart
+        run: |
+          # The kind network has an IPv6 and an IPv4 subnet, and the proxy listens on IPv4,
+          # so pick the IPv4 gateway.
+          gateway=$(docker network inspect kind -f '{{range .IPAM.Config}}{{.Gateway}}{{"\n"}}{{end}}' | grep -v ':' | head -1)
+          echo "DB host (runner gateway): $gateway"
+          helm upgrade --install app charts/app -f charts/app/values-ci.yaml \
+            --set-string db.host="$gateway" \
+            --wait --timeout 3m
+
+      - name: Check pods are healthy
+        run: |
+          kubectl rollout status deploy/app --timeout=60s
+          kubectl get pods -l app.kubernetes.io/instance=app
+          restarts=$(kubectl get pods -l app.kubernetes.io/instance=app \
+            -o jsonpath='{.items[*].status.containerStatuses[*].restartCount}')
+          echo "restart counts: $restarts"
+          for r in $restarts; do test "$r" = "0"; done
+
+      # The Service's endpoints must be exactly the pods this Deployment created, which
+      # catches a wrong or too-broad selector in service.yaml.
+      - name: Check Service endpoints match the Deployment's pods
+        run: |
+          pods=$(kubectl get pods -l app.kubernetes.io/instance=app \
+            -o jsonpath='{.items[*].status.podIP}' | tr ' ' '\n' | sort)
+          endpoints=$(kubectl get endpointslices -l kubernetes.io/service-name=app \
+            -o jsonpath='{.items[*].endpoints[*].addresses[*]}' | tr ' ' '\n' | sort)
+          echo "pod IPs:"; echo "$pods"
+          echo "Service endpoint IPs:"; echo "$endpoints"
+          test -n "$pods"
+          test "$pods" = "$endpoints"
+
+      # A Service IP is virtual and does not answer ICMP ping (and the pod has no NET_RAW),
+      # so resolve the Service DNS name and open a TCP connection to its port instead.
+      # The probes already cover /healthz.
+      - name: Check Service DNS and port from inside the pod
+        run: |
+          kubectl exec deploy/app -- python -c "import socket; host = 'app.default.svc.cluster.local'; ip = socket.gethostbyname(host); print(host, 'resolves to', ip); socket.create_connection((host, 80), timeout=5).close(); print('port 80 accepts connections')"
+
+      - name: Check DB connection from inside the pod
+        run: |
+          kubectl exec deploy/app -- python -c "from app import db; print(db.db_version())"
+
+      - name: Dump diagnostics
+        if: failure()
+        run: |
+          kubectl get pods -o wide || true
+          kubectl describe pods || true
+          kubectl logs deploy/app --tail=100 || true
+          cat proxy.log || true
